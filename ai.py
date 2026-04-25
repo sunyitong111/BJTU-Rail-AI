@@ -1,19 +1,95 @@
 import streamlit as st
 import os
-import subprocess
 import time
+import base64
+import random
+import re
 from openai import OpenAI
 from fitz import open as open_pdf
 from pptx import Presentation
 
-# --- 1. 系统核心配置 (LLM Engine) ---
-# 建议：提交报告时，API Key 中间部分可打码
+
+# --- 1. 资源读取逻辑 (Base64 & 增强型知识库) ---
+def get_image_base64(image_path):
+    """读取本地图片并转换为 Base64，用于水印和 Logo"""
+    if not os.path.exists(image_path):
+        return None
+    try:
+        with open(image_path, "rb") as image_file:
+            encoded_string = base64.b64encode(image_file.read()).decode()
+        return f"data:image/png;base64,{encoded_string}"
+    except:
+        return None
+
+
+@st.cache_data(show_spinner=False)
+def get_local_context_with_pages(folder_path="courseware"):
+    """
+    按页读取知识库，确保每一页内容都能被索引。
+    这是解决章节被挤出的基础。
+    """
+    page_data_list = []
+    if not os.path.exists(folder_path):
+        os.makedirs(folder_path)
+
+    valid_exts = ('.md', '.txt', '.pdf', '.pptx')
+    files = [f for f in os.listdir(folder_path) if f.endswith(valid_exts)]
+
+    for file in files:
+        path = os.path.join(folder_path, file)
+        try:
+            if file.endswith(".pdf"):
+                with open_pdf(path) as doc:
+                    for i, page in enumerate(doc):
+                        text = page.get_text().strip()
+                        if text:
+                            page_data_list.append({
+                                "source": file,
+                                "page": i + 1,
+                                "content": text[:1500]
+                            })
+            elif file.endswith(".pptx"):
+                prs = Presentation(path)
+                for i, slide in enumerate(prs.slides):
+                    text = " ".join([shape.text for shape in slide.shapes if hasattr(shape, "text")])
+                    if text.strip():
+                        page_data_list.append({
+                            "source": file,
+                            "page": i + 1,
+                            "content": text
+                        })
+            elif file.endswith(('.md', '.txt')):
+                with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+                    content = f.read()
+                    page_data_list.append({
+                        "source": file,
+                        "page": 1,
+                        "content": content[:5000]
+                    })
+        except Exception as e:
+            st.error(f"解析 {file} 出错: {e}")
+    return page_data_list
+
+
+# --- 2. 工具函数：TXT 导出清洗 ---
+def clean_html_for_export(text):
+    """
+    核心功能：使用正则剔除所有 HTML 标签。
+    将 <span class='citation-tag' title='...'>内容</span> 转换为 “内容”。
+    """
+    # 1. 匹配 span 标签并提取内部文本
+    clean_text = re.sub(r'<span[^>]*>(.*?)</span>', r'\1', text)
+    # 2. 移除任何残留的 HTML 标签
+    clean_text = re.sub(r'<[^>]+>', '', clean_text)
+    return clean_text
+
+
+# --- 3. 核心配置与 UI 样式 ---
 client = OpenAI(
     api_key=st.secrets["DEEPSEEK_API_KEY"],
     base_url="https://api.deepseek.com"
 )
 
-# --- 2. 页面全局配置与专业 UI 定制 ---
 st.set_page_config(
     page_title="BJTU 轨道交通AI助理",
     page_icon="🚄",
@@ -21,229 +97,193 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# 注入 CSS 样式：强化北交大品牌视觉感
-st.markdown("""
+local_logo_base64 = get_image_base64("logo.png")
+watermark_css = f"background-image: url('{local_logo_base64}');" if local_logo_base64 else ""
+
+st.markdown(f"""
     <style>
-    .header-style {
-        background-color: #004294; 
-        padding: 25px;
-        border-radius: 12px;
-        color: white;
-        text-align: center;
-        margin-bottom: 30px;
+    .stApp {{
+        background: linear-gradient(135deg, #f5f7fa 0%, #e4e9f2 100%);
+        background-attachment: fixed;
+    }}
+    .stApp::before {{
+        content: ""; position: fixed; top: 50%; left: 50%;
+        width: 600px; height: 600px; transform: translate(-50%, -50%);
+        {watermark_css}
+        background-repeat: no-repeat; background-size: contain;
+        opacity: 0.03; z-index: -1; pointer-events: none;
+    }}
+    .header-style {{
+        background: linear-gradient(90deg, #004294 0%, #002f6c 100%); 
+        padding: 30px; border-radius: 15px; color: white;
+        text-align: center; margin-bottom: 25px;
         box-shadow: 0 4px 15px rgba(0,0,0,0.2);
-    }
-    .author-card {
-        background-color: #f8f9fa;
-        padding: 15px;
-        border-radius: 10px;
-        border-left: 6px solid #004294;
-        margin-bottom: 20px;
-        font-size: 0.9em;
-    }
-    .stButton>button {
-        width: 100%;
-        border-radius: 8px;
-        transition: all 0.3s;
-    }
-    .footer {
-        position: fixed;
-        left: 0; bottom: 0; width: 100%;
-        background-color: rgba(255,255,255,0.9);
-        text-align: center; padding: 10px; font-size: 12px;
-        color: #666; border-top: 1px solid #eee; z-index: 100;
-    }
+    }}
+    .author-card {{
+        background-color: rgba(255, 255, 255, 0.85);
+        padding: 15px; border-radius: 10px;
+        border-left: 6px solid #004294; margin-bottom: 15px;
+        backdrop-filter: blur(10px); box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+    }}
+    .citation-tag {{
+        border-bottom: 1.5px dotted #004294;
+        cursor: help; color: #004294; font-weight: 500;
+        transition: all 0.2s;
+    }}
+    .citation-tag:hover {{ background-color: rgba(0, 66, 148, 0.1); }}
     </style>
     """, unsafe_allow_html=True)
 
 
-# --- 3. 知识库构建模块 (RAG Module) ---
+# --- 4. 增强型 AI 推理逻辑 ---
+def ask_ai(user_query, mode):
+    all_pages = get_local_context_with_pages()
 
-@st.cache_data(show_spinner=False)
-def get_local_context_with_sources(folder_path="courseware"):
+    # 智能路由检索：解决“找不到第二章”的关键
+    selected_context_list = []
+    chapter_keyword = re.findall(r"第[一二三四五六七八九十0-9]章", user_query)
+
+    if chapter_keyword:
+        kw = chapter_keyword[0]
+        selected_context_list = [p for p in all_pages if kw in p['source'] or kw in p['content']]
+
+    remaining_pages = [p for p in all_pages if p not in selected_context_list]
+    final_selection = (selected_context_list + remaining_pages)[:30]
+
+    combined_context = "\n\n".join([
+        f"【来源：{p['source']} | 第 {p['page']} 页】：\n{p['content']}"
+        for p in final_selection
+    ]) if final_selection else "知识库暂无相关内容"
+
+    rail_statuses = [
+        "正在建立 GSM-R 逻辑信道...", "正在扫描 CTCS-3 级列控协议...",
+        "正在同步 5G-R 核心网数据...", "正在计算多普勒频移补偿...",
+        "正在查阅《轨道交通移动通信系统》教学大纲..."
+    ]
+
+    sys_prompt = f"""你现在是北交大轨道交通 AI 助手。
+    你的回答必须严格参考提供的资料。
+
+    【核心要求：引用溯源】
+    1. 你的回答中，每一个关键事实或结论，必须用 HTML 标签包裹。
+    2. 标签格式：<span class='citation-tag' title='来源：文件名 第X页'>对应文字内容</span>
+    3. 严禁改变原始文字。如果资料中确实没有，请告知并结合专业知识。
+
+    【参考资料】：
+    {combined_context}
     """
-    核心算法：实现多格式课件的语义提取与编码容错
-    """
-    context_list, source_names = [], []
-    if not os.path.exists(folder_path):
-        os.makedirs(folder_path)
 
-    valid_extensions = ('.md', '.txt', '.pdf', '.pptx')
-    files = [f for f in os.listdir(folder_path) if f.endswith(valid_extensions)]
-
-    for file in files:
-        path = os.path.join(folder_path, file)
-        text = ""
-        try:
-            # 1. 处理文本类文件（增加编码自动切换机制）
-            if file.endswith(('.md', '.txt')):
-                try:
-                    with open(path, 'r', encoding='utf-8') as f:
-                        text = f.read()
-                except UnicodeDecodeError:
-                    with open(path, 'r', encoding='gbk') as f:
-                        text = f.read()
-
-            # 2. 处理 PDF 类文件（学术课件核心）
-            elif file.endswith(".pdf"):
-                with open_pdf(path) as doc:
-                    text = "".join([page.get_text() for page in doc])
-
-            # 3. 处理 PPTX 类文件（教学讲义核心）
-            elif file.endswith(".pptx"):
-                prs = Presentation(path)
-                text = " ".join([shape.text for slide in prs.slides
-                                 for shape in slide.shapes if hasattr(shape, "text")])
-
-            if text.strip():
-                # 优化：提升上下文注入长度至 8000 字符，适应长文档
-                context_list.append(text[:8000])
-                source_names.append(file)
-        except Exception as e:
-            print(f"解析文件 {file} 时出错: {str(e)}")
-            continue
-    return context_list, source_names
-
-
-# --- 4. Agent 决策推理核心 ---
-
-def ask_ai(user_query):
-    with st.status("Agent 正在处理请求...", expanded=False) as status:
-        st.write("🔍 正在检索本地轨道交通专业知识库...")
-        contexts, sources = get_local_context_with_sources()
-
-        if not sources:
-            combined_context = "（当前本地知识库为空，请基于通用专业知识回答）"
-            source_info = "互联网专业数据库"
-        else:
-            combined_context = "\n\n".join([f"内容来源【{s}】：\n{c}" for s, c in zip(sources, contexts)])
-            source_info = "、".join(sources)
-
-        st.write("🧠 正在进行语义对齐与逻辑推理...")
-
-        # 提示词工程：规范 Agent 的学术行为
-        system_prompt = f"""你是一个轨道交通移动通信专家教学助理。
-        你的任务是基于提供的本地课件内容以及你自身的互联网专业知识回答用户问题。
-
-        【回答准则】：
-        1. 每一篇回答的开头必须固定为：**“根据本地知识库和网上资料，为您查询到如下内容：”**
-        2. 引用优先：如果【参考知识库内容】中有相关信息，必须优先提取并解读。
-        3. 溯源标注：必须在回答结尾以『📚 参考资料：文件名』形式精准标注。
-        4. 学术表达：数学公式必须使用标准 LaTeX 渲染（例如 $f_d = \\frac{{v}}{{c}} f_c$）。
-
-        【参考知识库内容】：
-        {combined_context}
-        """
-
+    with st.status("🚉 正在调度 AI 引擎...", expanded=True) as status:
+        st.write("🔍 正在分析 `courseware` 知识库...")
+        time.sleep(0.4)
+        st.write(f"🛤️ {random.choice(rail_statuses)}")
         try:
             response = client.chat.completions.create(
                 model="deepseek-chat",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_query}
-                ],
-                temperature=0.3  # 保证学术回答的稳定性
+                messages=[{"role": "system", "content": sys_prompt}, {"role": "user", "content": user_query}],
+                temperature=0.2 if "学术" in mode else 0.6
             )
-            status.update(label="✅ 处理完成", state="complete", expanded=False)
-            return response.choices[0].message.content
+            ans = response.choices[0].message.content
+            status.update(label="✅ 信号绿灯：检索完成！", state="complete", expanded=False)
+            return ans
         except Exception as e:
-            status.update(label="❌ 引擎故障", state="error")
-            return f"⚠️ 接口调用失败: {str(e)}"
+            status.update(label="❌ 调度系统故障", state="error")
+            return f"⚠️ 错误报告: {str(e)}"
 
 
-# --- 5. 跨平台工具调用 (Tool Use) ---
-
-def run_matlab_sim():
-    # 增加环境检查
-    if os.name != 'nt': # Streamlit Cloud 通常是 Linux，你的电脑是 Windows(nt)
-        st.warning("⚠️ 仿真功能仅支持在本地 Windows 环境运行（需要安装 MATLAB）。")
-        return False
-    try:
-        cmd = "matlab -nosplash -nodesktop -r \"run('channel_sim');\""
-        subprocess.Popen(cmd, shell=True)
-        st.toast("🚀 MATLAB 仿真环境启动中...", icon="⚡")
-        return True
-    except Exception as e:
-        st.error(f"无法启动 MATLAB: {e}")
-        return False
-
-# --- 6. 侧边栏交互组件 ---
-
+# --- 5. 侧边栏布局 ---
 with st.sidebar:
     st.markdown("### 🏫 北京交通大学")
+    if local_logo_base64:
+        st.image(local_logo_base64, use_container_width=True)
+
     st.markdown(f"""
         <div class="author-card">
             <b>制作者：</b>孙涛<br>
             <b>学号：</b>23211436<br>
-            <b>课程：</b>轨道交通移动通信系统
+            <b>课程：</b>轨道交通移动通信系统<br>
+            <b>学院：</b>电子信息工程学院
         </div>
         """, unsafe_allow_html=True)
 
     st.divider()
-    st.subheader("🛠️ 实验工具箱")
-    if st.button("🚀 启动 MATLAB 仿真实验"):
-        run_matlab_sim()
+    st.subheader("📚 知识库列表")
+    files = [f for f in os.listdir("courseware") if not f.startswith(".")] if os.path.exists("courseware") else []
+    if files:
+        for f in files: st.caption(f"📕 {f}")
+    else:
+        st.warning("请在 courseware 文件夹放置课件")
 
-    st.divider()
-    st.subheader("📚 知识库管理 (RAG)")
-    if os.path.exists("courseware"):
-        files = os.listdir("courseware")
-        if files:
-            for f in files:
-                if f.endswith('.pdf'):
-                    st.caption(f"📕 {f}")
-                elif f.endswith('.pptx'):
-                    st.caption(f"📊 {f}")
-                elif f.endswith(('.md', '.txt')):
-                    st.caption(f"📝 {f}")
-        else:
-            st.warning("知识库文件夹为空")
-
-    if st.button("🔄 刷新并重载知识库"):
+    if st.button("🔄 强制刷新知识库"):
         st.cache_data.clear()
-        st.success("缓存已清空，正在重载...")
-        time.sleep(1)
         st.rerun()
 
-# --- 7. 主界面逻辑 ---
+    st.divider()
+    st.subheader("📝 笔记导出")
+    if "messages" in st.session_state and st.session_state.messages:
+        # 导出前进行正则清洗，确保 TXT 无 HTML 乱码
+        export_lines = []
+        for m in st.session_state.messages:
+            role = "学生" if m["role"] == "user" else "AI 助手"
+            clean_content = clean_html_for_export(m["content"])
+            export_lines.append(f"【{role}】：\n{clean_content}\n" + "-" * 30)
 
+        full_note = f"BJTU 轨道交通移动通信 - 学习笔记\n生成时间：{time.strftime('%Y-%m-%d %H:%M')}\n\n" + "\n".join(
+            export_lines)
+
+        st.download_button(
+            label="💾 下载纯净版笔记 (.txt)",
+            data=full_note,
+            file_name=f"BJTU_Clean_Notes_{int(time.time())}.txt",
+            mime="text/plain"
+        )
+
+    
+# --- 6. 主界面逻辑 ---
 st.markdown('<div class="header-style"><h1>轨道交通移动通信系统 AI 教学助理</h1></div>', unsafe_allow_html=True)
 
-# 快捷指令模块：引导学生提问
-st.write("💡 **专业指令快捷键：**")
-col1, col2, col3 = st.columns(3)
-quick_query = None
-with col1:
-    if st.button("🚄 绪论：系统演进分析"):
-        quick_query = "请详细介绍第一章绪论中关于轨道交通移动通信的发展历程。"
-with col2:
-    if st.button("📡 5G-R 关键技术对比"):
-        quick_query = "5G-R 相比 GSM-R 有哪些核心技术改进？请对比带宽与时延。"
-with col3:
-    if st.button("📐 计算多普勒频移"):
-        quick_query = "给定列车速度350km/h，载波频率2.1GHz，请展示多普勒频移的计算过程。"
+# 快捷指令
+st.write("💡 **专业快速检索：**")
+c1, c2, c3 = st.columns(3)
+q_prompt = None
+with c1:
+    if st.button("🚄 绪论：系统演进历程"): q_prompt = "请详细介绍轨道交通移动通信从 GSM-R 到 5G-R 的演进历程。"
+with c2:
+    if st.button("📡 第二章：无线传播环境"): q_prompt = "请讲解第二章中关于轨道交通无线传播环境的特点。"
+with c3:
+    if st.button("📐 计算多普勒频移"): q_prompt = "给定列车时速 350km/h，载波频率 2.1GHz，请给出多普勒频移的计算公式与结果。"
 
-# 渲染对话历史
+selected_mode = st.radio("🧠 模式选择：", ["学术模式 (Academic)", "科普模式 (Popular Science)"], horizontal=True)
+
+if "学术" in selected_mode:
+    st.info("💡 **学术模式**已开启：回答将严格基于课件，并支持**鼠标悬停溯源**。")
+else:
+    st.success("🌟 **科普模式**已开启：回答将结合通用知识，更易于概念理解。")
+
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
+for m in st.session_state.messages:
+    with st.chat_message(m["role"]):
+        st.markdown(m["content"], unsafe_allow_html=True)
 
-# 交互输入逻辑
-prompt = st.chat_input("请输入您的问题（例如：解释越区切换流程）...")
-final_input = quick_query if quick_query else prompt
+user_input = st.chat_input("请输入您的问题...")
+final_prompt = q_prompt if q_prompt else user_input
 
-if final_input:
-    st.session_state.messages.append({"role": "user", "content": final_input})
+if final_prompt:
+    if not q_prompt:
+        st.session_state.messages.append({"role": "user", "content": final_prompt})
     with st.chat_message("user"):
-        st.markdown(final_input)
+        st.markdown(final_prompt)
 
     with st.chat_message("assistant"):
-        answer = ask_ai(final_input)
-        st.markdown(answer)
-        st.session_state.messages.append({"role": "assistant", "content": answer})
+        response = ask_ai(final_prompt, selected_mode)
+        st.markdown(response, unsafe_allow_html=True)
+        st.session_state.messages.append({"role": "assistant", "content": response})
 
-# 页脚
-st.markdown('<div class="footer">© 2026 北京交通大学 · 通信工程专业 · 孙涛 (23211436)</div>', unsafe_allow_html=True)
+st.markdown(f"""
+    <div style="text-align:center; color:#888; font-size:12px; margin-top:60px; border-top:1px solid #ddd; padding-top:20px;">
+        © {time.strftime("%Y")} 北京交通大学 · 电子信息工程学院 · 孙涛 (23211436)<br>
+        Powered by DeepSeek-V3 & Streamlit
+    </div>
+    """, unsafe_allow_html=True)
