@@ -60,7 +60,7 @@ st.markdown("""
 # --- 3. 知识库构建模块 (RAG Module) ---
 
 @st.cache_data(show_spinner=False)
-def get_local_context_with_sources(folder_path="."):
+def get_local_context_with_sources(folder_path="courseware"):
     """
     核心算法：实现多格式课件的语义提取与编码容错
     """
@@ -186,8 +186,8 @@ with st.sidebar:
 
     st.divider()
     st.subheader("📚 知识库管理 (RAG)")
-    if os.path.exists("."):
-        files = os.listdir(".")
+    if os.path.exists("courseware"):
+        files = os.listdir("courseware")
         if files:
             for f in files:
                 if f.endswith('.pdf'):
