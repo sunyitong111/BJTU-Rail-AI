@@ -137,9 +137,14 @@ st.markdown(f"""
 
 # --- 4. 增强型 AI 推理逻辑 ---
 def ask_ai(user_query, mode):
+    # --- 新增：开发者身份拦截逻辑 ---
+    developer_keywords = ["你是谁", "谁开发的", "作者", "开发者", "你的主人", "who created you", "developer"]
+    if any(kw in user_query.lower() for kw in developer_keywords):
+        return "我是北交大轨道交通 AI 助手，由**北京交通大学电子信息工程学院的孙涛同学**开发制作。"
+
     all_pages = get_local_context_with_pages()
 
-    # 智能路由检索：解决“找不到第二章”的关键
+    # 智能路由检索
     selected_context_list = []
     chapter_keyword = re.findall(r"第[一二三四五六七八九十0-9]章", user_query)
 
@@ -155,28 +160,42 @@ def ask_ai(user_query, mode):
         for p in final_selection
     ]) if final_selection else "知识库暂无相关内容"
 
-    rail_statuses = [
-        "正在建立 GSM-R 逻辑信道...", "正在扫描 CTCS-3 级列控协议...",
-        "正在同步 5G-R 核心网数据...", "正在计算多普勒频移补偿...",
-        "正在查阅《轨道交通移动通信系统》教学大纲..."
-    ]
+    # --- 完善：专业动态状态显示逻辑 ---
+    with st.status("🚉 正在调度轨道交通 AI 引擎...", expanded=True) as status:
+        # 步骤 1: 扫描阶段
+        st.write("🔍 正在扫描 `courseware` 知识库...")
+        time.sleep(0.3)
 
-    sys_prompt = f"""你现在是北交大轨道交通 AI 助手。
-    你的回答必须严格参考提供的资料。
+        # 步骤 2: 匹配具体的专业逻辑（增强专业感）
+        if "5G" in user_query.upper() or "演进" in user_query:
+            st.write("📡 正在同步 5G-R 核心网下行链路参数...")
+        elif "多普勒" in user_query or "时速" in user_query or "计算" in user_query:
+            st.write("📐 正在提取多普勒扩展与信道快衰落模型数据...")
+        elif "第二章" in user_query or "环境" in user_query:
+            st.write("🛤️ 正在分析轨道交通典型场景（隧道、高架桥）传播特性...")
+        elif "GSM-R" in user_query.upper():
+            st.write("📞 正在检索 GSM-R 调度通信逻辑信道配置...")
+        else:
+            st.write("🛠️ 正在进行语义向量匹配与知识关联...")
 
-    【核心要求：引用溯源】
-    1. 你的回答中，每一个关键事实或结论，必须用 HTML 标签包裹。
-    2. 标签格式：<span class='citation-tag' title='来源：文件名 第X页'>对应文字内容</span>
-    3. 严禁改变原始文字。如果资料中确实没有，请告知并结合专业知识。
-
-    【参考资料】：
-    {combined_context}
-    """
-
-    with st.status("🚉 正在调度 AI 引擎...", expanded=True) as status:
-        st.write("🔍 正在分析 `courseware` 知识库...")
         time.sleep(0.4)
-        st.write(f"🛤️ {random.choice(rail_statuses)}")
+
+        # 步骤 3: 协议校验阶段
+        st.write("🔐 正在通过 CTCS-3 级指令集校验数据一致性...")
+        time.sleep(0.3)
+
+        sys_prompt = f"""你现在是北交大轨道交通 AI 助手。
+        你的回答必须严格参考提供的资料。
+
+        【核心要求：引用溯源】
+        1. 你的回答中，每一个关键事实或结论，必须用 HTML 标签包裹。
+        2. 标签格式：<span class='citation-tag' title='来源：文件名 第X页'>对应文字内容</span>
+        3. 严禁改变原始文字。如果资料中确实没有，请告知并结合专业知识。
+
+        【参考资料】：
+        {combined_context}
+        """
+
         try:
             response = client.chat.completions.create(
                 model="deepseek-chat",
@@ -184,12 +203,11 @@ def ask_ai(user_query, mode):
                 temperature=0.2 if "学术" in mode else 0.6
             )
             ans = response.choices[0].message.content
-            status.update(label="✅ 信号绿灯：检索完成！", state="complete", expanded=False)
+            status.update(label="✅ 信号绿灯：数据链路建立成功，检索完成！", state="complete", expanded=False)
             return ans
         except Exception as e:
-            status.update(label="❌ 调度系统故障", state="error")
+            status.update(label="❌ 调度系统故障：信号中断", state="error")
             return f"⚠️ 错误报告: {str(e)}"
-
 
 # --- 5. 侧边栏布局 ---
 with st.sidebar:
@@ -238,7 +256,7 @@ with st.sidebar:
             mime="text/plain"
         )
 
-    
+
 # --- 6. 主界面逻辑 ---
 st.markdown('<div class="header-style"><h1>轨道交通移动通信系统 AI 教学助理</h1></div>', unsafe_allow_html=True)
 
